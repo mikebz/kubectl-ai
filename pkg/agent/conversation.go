@@ -231,7 +231,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 			}
 
 			s := toolCall.PrettyPrint()
-			a.doc.AddBlock(ui.NewFunctionCallRequestBlock().SetText(fmt.Sprintf("  Running: %s\n", s)))
+			a.doc.AddBlock(ui.NewFunctionCallRequestBlock().WithText(fmt.Sprintf("  Running: %s\n", s)))
 			// Ask for confirmation only if SkipPermissions is false AND the tool modifies resources.
 			if !a.SkipPermissions && call.Arguments["modifies_resource"] != "no" {
 				confirmationPrompt := `  Do you want to proceed ?
@@ -267,7 +267,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 					// This case should technically not be reachable due to AskForConfirmation loop
 					err := fmt.Errorf("invalid confirmation choice: %q", selectedChoice)
 					log.Error(err, "Invalid choice received from AskForConfirmation")
-					a.doc.AddBlock(ui.NewErrorBlock().SetText("Invalid choice received. Cancelling operation."))
+					a.doc.AddBlock(ui.NewErrorBlock().WithText("Invalid choice received. Cancelling operation."))
 					return err
 				}
 			}
@@ -309,7 +309,7 @@ func (a *Conversation) RunOneRound(ctx context.Context, query string) error {
 
 	// If we've reached the maximum number of iterations
 	log.Info("Max iterations reached", "iterations", maxIterations)
-	errorBlock := ui.NewErrorBlock().SetText(fmt.Sprintf("Sorry, couldn't complete the task after %d iterations.\n", maxIterations))
+	errorBlock := ui.NewErrorBlock().WithText(fmt.Sprintf("Sorry, couldn't complete the task after %d iterations.\n", maxIterations))
 	a.doc.AddBlock(errorBlock)
 	return fmt.Errorf("max iterations reached")
 }

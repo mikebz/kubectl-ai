@@ -98,15 +98,19 @@ func (b *FunctionCallRequestBlock) Text() string {
 	return b.text
 }
 
-func (b *FunctionCallRequestBlock) SetText(agentText string) *FunctionCallRequestBlock {
+func (b *FunctionCallRequestBlock) SetText(agentText string) {
 	b.text = agentText
 	b.history.blockChanged(b)
+}
+
+func (b *FunctionCallRequestBlock) WithText(agentText string) *FunctionCallRequestBlock {
+	b.SetText(agentText)
 	return b
 }
 
 // ErrorBlock is used to render an error condition
 type ErrorBlock struct {
-	doc *History
+	history *History
 
 	// text is populated if this is agent text output
 	text string
@@ -116,21 +120,25 @@ func NewErrorBlock() *ErrorBlock {
 	return &ErrorBlock{}
 }
 
-func (b *ErrorBlock) attached(doc *History) {
-	b.doc = doc
+func (b *ErrorBlock) attached(history *History) {
+	b.history = history
 }
 
 func (b *ErrorBlock) History() *History {
-	return b.doc
+	return b.history
 }
 
 func (b *ErrorBlock) Text() string {
 	return b.text
 }
 
-func (b *ErrorBlock) SetText(agentText string) *ErrorBlock {
+func (b *ErrorBlock) SetText(agentText string) {
 	b.text = agentText
-	b.doc.blockChanged(b)
+	b.history.blockChanged(b)
+}
+
+func (b *ErrorBlock) WithText(agentText string) *ErrorBlock {
+	b.SetText(agentText)
 	return b
 }
 

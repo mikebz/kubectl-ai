@@ -73,7 +73,7 @@ func TestHistoryNotification(t *testing.T) {
 		t.Errorf("After AddBlock(b2), blocks[1] = %v; want %v", h.blocks[1], b2)
 	}
 	if b2.History() != h {
-		t.Errorf("After AddBlock(b2), b2.doc = %v; want %v", b2.doc, h)
+		t.Errorf("After AddBlock(b2), b2.doc = %v; want %v", b2.history, h)
 	}
 
 	// Allow time for notification
