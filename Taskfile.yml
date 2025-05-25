@@ -1,7 +1,8 @@
 version: '3'
 
 vars:
-  BINARY_NAME: kubectl-ai
+
+dotenv: ['.env']
 
 tasks:
   default:
@@ -10,13 +11,13 @@ tasks:
       - task --list
 
   # Build tasks
-  build:
+  build-recursive:
     desc: Build the binary using dev script
     cmds:
       - mkdir -p ./bin
       - ./dev/ci/presubmits/go-build.sh
 
-  build-single:
+  build:
     desc: Build single binary for current platform
     cmds:
       - mkdir -p ./bin
@@ -89,24 +90,19 @@ tasks:
       - task: verify-format
       - task: verify-gomod
       - task: verify-autogen
-      - task: build
+      - task: build-recursive
       - task: vet
-
-  presubmit:
-    desc: Run all presubmit checks
-    cmds:
-      - task: check
 
   # Development workflow
   dev:
     desc: Development mode - build and run
-    deps: [build-single]
+    deps: [build]
     cmds:
       - ./bin/kubectl-ai
 
   dev-html:
     desc: Development mode - build and run with HTML UI
-    deps: [build-single]
+    deps: [build]
     cmds:
       - ./bin/kubectl-ai --user-interface html
 
@@ -131,18 +127,9 @@ tasks:
   # Installation
   install:
     desc: Install the binary
-    deps: [build-single]
+    deps: [build]
     cmds:
       - cp ./bin/kubectl-ai $(go env GOPATH)/bin/
-
-  # Release preparation
-  prepare-release:
-    desc: Prepare for release (format, generate, verify)
-    cmds:
-      - task: fmt
-      - task: generate-actions
-      - task: tidy
-      - task: check
 
   # Testing (basic - extend based on your test setup)
   test:
