@@ -1,0 +1,39 @@
+# Refer to the official Dependabot documentation for all configuration options:
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # Configuration for GitHub Actions
+  # See: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#package-ecosystem
+  - package-ecosystem: "github-actions"
+    # Check for updates in the .github/workflows directory and action.yml/action.yaml files in the root.
+    # See: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#directory
+    directory: "/"
+    # Check for updates weekly.
+    # See: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#scheduleinterval
+    schedule:
+      interval: "weekly"
+    # Add comments to explain the choice of weekly interval
+    # Weekly updates provide a good balance between staying up-to-date and avoiding excessive notifications.
+
+  # Configuration for Go modules
+  # See: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#package-ecosystem
+  - package-ecosystem: "gomod"
+    # Check for go.mod files in all subdirectories from the root.
+    # See: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#directory
+    directory: "/"
+    # Check for updates weekly.
+    # See: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#scheduleinterval
+    schedule:
+      interval: "weekly"
+    # Add comments to explain the choice of weekly interval
+    # Weekly updates provide a good balance between staying up-to-date and avoiding excessive notifications.
+    # Configure update types to only include minor and patch versions to avoid breaking changes from major version updates.
+    # See: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file#update-types
+    update-types:
+      - "minor"
+      - "patch"
+    # Add comments to explain the choice of update-types
+    # This helps in maintaining stability by avoiding potentially disruptive major version upgrades,
+    # while still benefiting from bug fixes (patch) and new non-breaking features (minor).
+    # Major updates often require manual intervention and testing.
