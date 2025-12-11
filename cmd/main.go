@@ -181,7 +181,6 @@ func (o *Options) InitDefaults() {
 
 	// Session management options
 	o.ResumeSession = ""
-	o.NewSession = false
 	o.ListSessions = false
 	o.DeleteSession = ""
 	o.SessionBackend = "memory"
@@ -334,9 +333,9 @@ func (opt *Options) bindCLIFlags(f *pflag.FlagSet) error {
 	f.StringVar(&opt.SandboxImage, "sandbox-image", opt.SandboxImage, "container image to use for the sandbox")
 
 	f.StringVar(&opt.ResumeSession, "resume-session", opt.ResumeSession, "ID of session to resume (use 'latest' for the most recent session)")
-	f.BoolVar(&opt.NewSession, "new-session", opt.NewSession, "create a new session")
 	f.BoolVar(&opt.ListSessions, "list-sessions", opt.ListSessions, "list all available sessions")
 	f.StringVar(&opt.DeleteSession, "delete-session", opt.DeleteSession, "delete a session by ID")
+	f.BoolVar(&opt.NewSession, "new-session", opt.NewSession, "start a new persistent session")
 	f.StringVar(&opt.SessionBackend, "session-backend", opt.SessionBackend,
 		"session backend to use (memory or filesystem)")
 
@@ -344,9 +343,9 @@ func (opt *Options) bindCLIFlags(f *pflag.FlagSet) error {
 }
 
 func RunRootCommand(ctx context.Context, opt Options, args []string) error {
-	var err error // Declare err once for the whole function
+	var err error
 
-	// Automatically upgrade backend to filesystem if session persistence flags are requested explicitly.
+	// Automatically upgrade backend to filesystem if session persistence flags are requested explicitly
 	if (opt.NewSession || opt.ResumeSession != "" || opt.ListSessions || opt.DeleteSession != "") && opt.SessionBackend == "memory" {
 		klog.Infof("Upgrading session-backend to 'filesystem' based on provided flags")
 		opt.SessionBackend = "filesystem"
@@ -397,79 +396,6 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 
 	klog.Info("Application started", "pid", os.Getpid())
 
-	var llmClient gollm.Client
-	if opt.SkipVerifySSL {
-		llmClient, err = gollm.NewClient(ctx, opt.ProviderID, gollm.WithSkipVerifySSL())
-	} else {
-		llmClient, err = gollm.NewClient(ctx, opt.ProviderID)
-	}
-	if err != nil {
-		return fmt.Errorf("creating llm client: %w", err)
-	}
-	defer llmClient.Close()
-
-	// Initialize session management
-	var session *api.Session
-	var sessionManager *sessions.SessionManager
-
-	if opt.NewSession || opt.ResumeSession != "" {
-		sessionManager, err = sessions.NewSessionManager(opt.SessionBackend)
-		if err != nil {
-			return fmt.Errorf("failed to create session manager: %w", err)
-		}
-
-		if opt.NewSession {
-			meta := sessions.Metadata{
-				ProviderID: opt.ProviderID,
-				ModelID:    opt.ModelID,
-			}
-			session, err = sessionManager.NewSession(meta)
-			if err != nil {
-				return fmt.Errorf("failed to create a new session: %w", err)
-			}
-			if opt.SessionBackend == "filesystem" {
-				klog.Infof("Created new session: %s\n", session.ID)
-			}
-		} else {
-			if opt.ResumeSession == "" || opt.ResumeSession == "latest" {
-				session, err = sessionManager.GetLatestSession()
-				if err != nil {
-					return fmt.Errorf("failed to get latest session: %w", err)
-				}
-				if session == nil {
-					meta := sessions.Metadata{
-						ProviderID: opt.ProviderID,
-						ModelID:    opt.ModelID,
-					}
-					session, err = sessionManager.NewSession(meta)
-					if err != nil {
-						return fmt.Errorf("failed to create new session: %w", err)
-					}
-					if opt.SessionBackend == "filesystem" {
-						klog.Infof("No previous session found. Created new session: %s\n", session.ID)
-					}
-				}
-			} else {
-				sessionID := opt.ResumeSession
-				session, err = sessionManager.FindSessionByID(sessionID)
-				if err != nil {
-					return fmt.Errorf("session %s not found: %w", sessionID, err)
-				}
-			}
-
-			if session != nil {
-				if err := sessionManager.UpdateLastAccessed(session); err != nil {
-					klog.Warningf("Failed to update session last accessed time: %v", err)
-				}
-			}
-		}
-	}
-
-	var chatStore api.ChatMessageStore
-	if session != nil {
-		chatStore = session.ChatMessageStore
-	}
-
 	var recorder journal.Recorder
 	if opt.TracePath != "" {
 		var fileRecorder journal.Recorder
@@ -485,56 +411,130 @@ func RunRootCommand(ctx context.Context, opt Options, args []string) error {
 		defer recorder.Close()
 	}
 
-	k8sAgent := &agent.Agent{
-		Model:              opt.ModelID,
-		Provider:           opt.ProviderID,
-		Kubeconfig:         opt.KubeConfigPath,
-		LLM:                llmClient,
-		MaxIterations:      opt.MaxIterations,
-		PromptTemplateFile: opt.PromptTemplateFilePath,
-		ExtraPromptPaths:   opt.ExtraPromptPaths,
-		Tools:              tools.Default(),
-		Recorder:           recorder,
-		RemoveWorkDir:      opt.RemoveWorkDir,
-		SkipPermissions:    opt.SkipPermissions,
-		EnableToolUseShim:  opt.EnableToolUseShim,
-		MCPClientEnabled:   opt.MCPClient,
-		RunOnce:            opt.Quiet,
-		InitialQuery:       queryFromCmd,
-		ChatMessageStore:   chatStore,
-		Sandbox:            opt.Sandbox,
-		SandboxImage:       opt.SandboxImage,
-		Session:            session,
-		SessionBackend:     opt.SessionBackend,
+	// Initialize session management
+	var session *api.Session
+	var sessionManager *sessions.SessionManager
+
+	sessionManager, err = sessions.NewSessionManager(opt.SessionBackend)
+	if err != nil {
+		return fmt.Errorf("failed to create session manager: %w", err)
 	}
 
-	err = k8sAgent.Init(ctx)
-	if err != nil {
-		return fmt.Errorf("starting k8s agent: %w", err)
+	// Build agentFactory for new agents
+	agentFactory := func(ctx context.Context) (*agent.Agent, error) {
+		var client gollm.Client
+		var err error
+		if opt.SkipVerifySSL {
+			client, err = gollm.NewClient(ctx, opt.ProviderID, gollm.WithSkipVerifySSL())
+		} else {
+			client, err = gollm.NewClient(ctx, opt.ProviderID)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("creating llm client: %w", err)
+		}
+
+		return &agent.Agent{
+			Model:              opt.ModelID,
+			Provider:           opt.ProviderID,
+			Kubeconfig:         opt.KubeConfigPath,
+			LLM:                client,
+			MaxIterations:      opt.MaxIterations,
+			PromptTemplateFile: opt.PromptTemplateFilePath,
+			ExtraPromptPaths:   opt.ExtraPromptPaths,
+			Tools:              tools.Default(),
+			Recorder:           recorder,
+			RemoveWorkDir:      opt.RemoveWorkDir,
+			SkipPermissions:    opt.SkipPermissions,
+			EnableToolUseShim:  opt.EnableToolUseShim,
+			MCPClientEnabled:   opt.MCPClient,
+			Sandbox:            opt.Sandbox,
+			SandboxImage:       opt.SandboxImage,
+			SessionBackend:     opt.SessionBackend,
+			RunOnce:            opt.Quiet,
+			InitialQuery:       queryFromCmd,
+		}, nil
 	}
-	defer k8sAgent.Close()
+
+	agentManager := agent.NewAgentManager(agentFactory, sessionManager)
+
+	// Register cleanup for all sessions and agents
+	defer agentManager.Close()
+
+	if opt.ResumeSession != "" {
+		if opt.ResumeSession == "latest" {
+			session, err = sessionManager.GetLatestSession()
+			if err != nil {
+				return fmt.Errorf("failed to get latest session: %w", err)
+			}
+			if session == nil {
+				// No latest session found, create a new one
+				klog.Info("No previous session found to resume. Creating new session.")
+			}
+		} else {
+			session, err = sessionManager.FindSessionByID(opt.ResumeSession)
+			if err != nil {
+				return fmt.Errorf("session %s not found: %w", opt.ResumeSession, err)
+			}
+		}
+	}
+
+	var defaultAgent *agent.Agent
+
+	// If no session loaded (or resume failed/not requested), create a new one
+	if session == nil {
+		meta := sessions.Metadata{
+			ModelID:    opt.ModelID,
+			ProviderID: opt.ProviderID,
+		}
+		session, err = sessionManager.NewSession(meta)
+		if err != nil {
+			return fmt.Errorf("failed to create a new session: %w", err)
+		}
+
+		defaultAgent, err = agentManager.GetAgent(ctx, session.ID)
+		if err != nil {
+			return fmt.Errorf("failed to get agent for new session: %w", err)
+		}
+		klog.Infof("Created new session: %s\n", session.ID)
+	} else {
+		// Update last accessed for resumed session
+		if err := sessionManager.UpdateLastAccessed(session); err != nil {
+			klog.Warningf("Failed to update session last accessed time: %v", err)
+		}
+		klog.Infof("Resuming session: %s\n", session.ID)
+
+		defaultAgent, err = agentManager.GetAgent(ctx, session.ID)
+		if err != nil {
+			return fmt.Errorf("failed to get agent for session: %w", err)
+		}
+	}
 
 	var userInterface ui.UI
 	switch opt.UIType {
 	case ui.UITypeTerminal:
 		// since stdin is already consumed, we use TTY for taking input from user
 		useTTYForInput := hasInputData
-		userInterface, err = ui.NewTerminalUI(k8sAgent, useTTYForInput, opt.ShowToolOutput, recorder)
+		userInterface, err = ui.NewTerminalUI(defaultAgent, useTTYForInput, opt.ShowToolOutput, recorder)
 		if err != nil {
 			return fmt.Errorf("creating terminal UI: %w", err)
 		}
 	case ui.UITypeWeb:
-		userInterface, err = html.NewHTMLUserInterface(k8sAgent, opt.UIListenAddress, recorder)
+		userInterface, err = html.NewHTMLUserInterface(agentManager, sessionManager, opt.ModelID, opt.ProviderID, opt.UIListenAddress, recorder)
 		if err != nil {
 			return fmt.Errorf("creating web UI: %w", err)
 		}
 	case ui.UITypeTUI:
-		userInterface = ui.NewTUI(k8sAgent)
+		userInterface = ui.NewTUI(defaultAgent)
 	default:
 		return fmt.Errorf("ui-type mode %q is not known", opt.UIType)
 	}
 
-	return repl(ctx, queryFromCmd, userInterface, k8sAgent)
+	err = userInterface.Run(ctx)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("running UI: %w", err)
+	}
+
+	return nil
 }
 
 func handleCustomTools(toolConfigPaths []string) error {
@@ -576,24 +576,6 @@ func handleCustomTools(toolConfigPaths []string) error {
 	return nil
 }
 
-// repl is a read-eval-print loop for the chat session.
-func repl(ctx context.Context, initialQuery string, ui ui.UI, agent *agent.Agent) error {
-	query := initialQuery
-	// Note: Initial greeting and MCP status are now handled by the agent itself
-	// through the message-based system
-	err := agent.Run(ctx, query)
-	if err != nil {
-		return fmt.Errorf("running agent: %w", err)
-	}
-
-	err = ui.Run(ctx)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("running UI: %w", err)
-	}
-
-	return nil
-}
-
 // Redirect standard log output to our custom klog writer
 // This is primarily to suppress warning messages from
 // genai library https://github.com/googleapis/go-genai/blob/6ac4afc0168762dc3b7a4d940fc463cc1854f366/types.go#L1633
@@ -608,7 +590,6 @@ func redirectStdLogToKlog() {
 // Define a custom writer that forwards messages to klog.Warning
 type klogWriter struct{}
 
-// Implement the io.Writer interface
 func (writer klogWriter) Write(data []byte) (n int, err error) {
 	// We trim the trailing newline because klog adds its own.
 	message := string(bytes.TrimSuffix(data, []byte("\n")))
@@ -689,7 +670,11 @@ func resolveKubeConfigPath(opt *Options) error {
 		if err != nil {
 			return fmt.Errorf("failed to get user home directory: %w", err)
 		}
-		opt.KubeConfigPath = filepath.Join(home, ".kube", "config")
+		defaultPath := filepath.Join(home, ".kube", "config")
+		// Only use the default path if it exists
+		if _, err := os.Stat(defaultPath); err == nil {
+			opt.KubeConfigPath = defaultPath
+		}
 	}
 
 	// We resolve the kubeconfig path to an absolute path, so we can run kubectl from any working directory.
@@ -756,7 +741,6 @@ func handleDeleteSession(opt Options) error {
 		return fmt.Errorf("failed to create session manager: %w", err)
 	}
 
-	// Check if session exists
 	session, err := manager.FindSessionByID(opt.DeleteSession)
 	if err != nil {
 		return fmt.Errorf("session %s not found: %w", opt.DeleteSession, err)

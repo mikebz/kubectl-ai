@@ -132,6 +132,9 @@ type Agent struct {
 
 	// lastErr is the most recent error run into, for use across the stack
 	lastErr error
+
+	// cancel is the function to cancel the agent's context
+	cancel context.CancelFunc
 }
 
 // Assert InMemoryChatStore implements ChatMessageStore
@@ -206,10 +209,6 @@ func (s *Agent) Init(ctx context.Context) error {
 		return fmt.Errorf("RunOnce mode requires an initial query to be provided")
 	}
 
-	if s.SessionBackend == "" {
-		s.SessionBackend = "memory"
-	}
-
 	if s.Session != nil {
 		if s.Session.ChatMessageStore == nil {
 			s.Session.ChatMessageStore = sessions.NewInMemoryChatStore()
@@ -226,20 +225,7 @@ func (s *Agent) Init(ctx context.Context) error {
 		}
 		s.Session.Messages = s.Session.ChatMessageStore.ChatMessages()
 	} else {
-		if s.ChatMessageStore == nil {
-			s.ChatMessageStore = sessions.NewInMemoryChatStore()
-		}
-
-		s.Session = &api.Session{
-			ID:               uuid.New().String(),
-			ProviderID:       s.Provider,
-			ModelID:          s.Model,
-			Messages:         s.ChatMessageStore.ChatMessages(),
-			AgentState:       api.AgentStateIdle,
-			ChatMessageStore: s.ChatMessageStore,
-			CreatedAt:        time.Now(),
-			LastModified:     time.Now(),
-		}
+		return fmt.Errorf("agent requires a session to be provided")
 	}
 
 	// Create a temporary working directory
@@ -380,6 +366,16 @@ func (c *Agent) Close() error {
 			klog.Info("Executor cleaned up successfully")
 		}
 	}
+	// Cancel the agent's context
+	if c.cancel != nil {
+		c.cancel()
+	}
+	// Close the LLM client
+	if c.LLM != nil {
+		if err := c.LLM.Close(); err != nil {
+			klog.Warningf("error closing LLM client: %v", err)
+		}
+	}
 	return nil
 }
 
@@ -397,6 +393,11 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 	// Save unexpected error and return it in for RunOnce mode
 	log.Info("Starting agent loop", "initialQuery", initialQuery, "runOnce", c.RunOnce)
 	go func() {
+		// If initialQuery is empty, try to use the one from the struct
+		if initialQuery == "" {
+			initialQuery = c.InitialQuery
+		}
+
 		if initialQuery != "" {
 			c.addMessage(api.MessageSourceUser, api.MessageTypeText, initialQuery)
 			answer, handled, err := c.handleMetaQuery(ctx, initialQuery)
@@ -424,20 +425,9 @@ func (c *Agent) Run(ctx context.Context, initialQuery string) error {
 				c.pendingFunctionCalls = []ToolCallAnalysis{}
 			}
 		} else {
-			if len(c.Session.Messages) > 0 {
-				// Resuming existing session
-				greetingMessage := "Welcome back. What can I help you with today?\n (Don't want to continue your last session? Use --new-session)"
-				if c.SessionBackend == "filesystem" {
-					greetingMessage = fmt.Sprintf("%s\n\n%s", greetingMessage, c.Session.String())
-				}
-				c.addMessage(api.MessageSourceAgent, api.MessageTypeText, greetingMessage)
-			} else {
+			if len(c.Session.Messages) == 0 {
 				// Starting new session
-				greetingMessage := "Hey there, what can I help you with today?"
-				if c.SessionBackend == "filesystem" {
-					greetingMessage = fmt.Sprintf("%s\n\n%s", greetingMessage, c.Session.String())
-				}
-				c.addMessage(api.MessageSourceAgent, api.MessageTypeText, greetingMessage)
+				c.addMessage(api.MessageSourceAgent, api.MessageTypeText, "Hey there, what can I help you with today?")
 			}
 		}
 		c.lastErr = nil
@@ -868,13 +858,71 @@ func (c *Agent) handleMetaQuery(ctx context.Context, query string) (answer strin
 			return "Invalid command. Usage: resume-session <session_id>", true, nil
 		}
 		sessionID := parts[1]
-		if err := c.loadSession(sessionID); err != nil {
+		if err := c.LoadSession(sessionID); err != nil {
 			return "", false, err
 		}
 		return fmt.Sprintf("Resumed session %s.", sessionID), true, nil
 	}
 
 	return "", false, nil
+}
+
+func (c *Agent) NewSession() (string, error) {
+	if _, err := c.SaveSession(); err != nil {
+		return "", fmt.Errorf("failed to save current session: %w", err)
+	}
+
+	manager, err := sessions.NewSessionManager(c.SessionBackend)
+	if err != nil {
+		return "", fmt.Errorf("failed to create session manager: %w", err)
+	}
+
+	metadata := sessions.Metadata{
+		ModelID:    c.Model,
+		ProviderID: c.Provider,
+	}
+
+	newSession, err := manager.NewSession(metadata)
+	if err != nil {
+		return "", fmt.Errorf("failed to create new session: %w", err)
+	}
+
+	// If we are using a sandbox, we should spin up a new one for the new session
+	if c.Sandbox == "k8s" {
+		sandboxName := fmt.Sprintf("kubectl-ai-sandbox-%s", uuid.New().String()[:8])
+		sandboxImage := c.SandboxImage
+
+		sb, err := sandbox.NewKubernetesSandbox(sandboxName,
+			sandbox.WithKubeconfig(c.Kubeconfig),
+			sandbox.WithImage(sandboxImage),
+		)
+
+		if err != nil {
+			return "", fmt.Errorf("failed to create new sandbox: %w", err)
+		}
+
+		c.sessionMu.Lock()
+		if c.executor != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := c.executor.Close(ctx); err != nil {
+				klog.Warningf("error closing old executor: %v", err)
+			}
+			cancel()
+		}
+
+		c.executor = sb
+		klog.Info("Created new sandbox for new session", "name", sandboxName)
+
+		c.Tools.RegisterTool(tools.NewBashTool(c.executor))
+		c.Tools.RegisterTool(tools.NewKubectlTool(c.executor))
+		c.sessionMu.Unlock()
+	}
+
+	if err := c.LoadSession(newSession.ID); err != nil {
+		return "", fmt.Errorf("failed to load new session: %w", err)
+	}
+
+	return newSession.ID, nil
 }
 
 func (c *Agent) SaveSession() (string, error) {
@@ -885,6 +933,7 @@ func (c *Agent) SaveSession() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create session manager: %w", err)
 	}
+
 	if c.Session != nil {
 		foundSession, _ := manager.FindSessionByID(c.Session.ID)
 		if foundSession != nil {
@@ -920,8 +969,8 @@ func (c *Agent) SaveSession() (string, error) {
 	return newSession.ID, nil
 }
 
-// loadSession loads a session by ID (or latest), updates the agent's state, and re-initializes the chat.
-func (c *Agent) loadSession(sessionID string) error {
+// LoadSession loads a session by ID (or latest), updates the agent's state, and re-initializes the chat.
+func (c *Agent) LoadSession(sessionID string) error {
 	manager, err := sessions.NewSessionManager(c.SessionBackend)
 	if err != nil {
 		return fmt.Errorf("failed to create session manager: %w", err)
@@ -934,7 +983,6 @@ func (c *Agent) loadSession(sessionID string) error {
 			return fmt.Errorf("failed to get latest session: %w", err)
 		}
 		if s == nil {
-			// This can happen if GetLatestSession returns nil, nil (no sessions exist)
 			return fmt.Errorf("no sessions found to resume")
 		}
 		session = s
@@ -957,6 +1005,11 @@ func (c *Agent) loadSession(sessionID string) error {
 	c.ChatMessageStore = session.ChatMessageStore
 	c.Session.Messages = session.ChatMessageStore.ChatMessages()
 	c.Session.LastModified = time.Now()
+
+	// Reset state if it was left running (e.g. from a crash)
+	if c.Session.AgentState == api.AgentStateRunning || c.Session.AgentState == api.AgentStateInitializing {
+		c.Session.AgentState = api.AgentStateIdle
+	}
 
 	if err := manager.UpdateLastAccessed(session); err != nil {
 		return fmt.Errorf("failed to update session metadata: %w", err)
